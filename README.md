@@ -107,20 +107,7 @@ Masks go to `MASK_GDB` as `<ISO>_tcd_merged_mask`. Vector tiles go to
 
 ## Data archive
 
-Input data and results are archived on S3. See the table below for where
-each input lives.
-
-| Config variable | S3 location |
-|-----------------|-------------|
-| `COUNTRY_EHS` | *TBD* |
-| `LOSS_MOSAIC` / `AREA_MOSAIC` | *TBD* |
-| `DISTANCE_TABLE` | *TBD* |
-| `PRIMARY_RASTER_TILES` | *TBD* |
-| `MASK_GDB` | *TBD* |
-| Results | *TBD* |
-
-Geodatabases must be zipped before upload. Syncing them as loose files
-corrupts them.
+Input data and results are archived on S3 at gfw-files\emerging_hot_spots
 
 ## Notes and known issues
 
