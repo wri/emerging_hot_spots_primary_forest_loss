@@ -1,0 +1,221 @@
+import arcpy
+import os
+import subprocess
+import glob
+
+import config
+
+from arcpy.sa import Raster, SetNull
+
+
+def make_year_mask_raster(loss_raster, short_year, scratch_folder, iso):
+    """
+    1 where loss == short_year, NoData elsewhere.
+    Isolates a single loss year for per-year SUM aggregation.
+    """
+    arcpy.CheckOutExtension("Spatial")
+    arcpy.env.overwriteOutput = True
+
+    out_raster = os.path.join(scratch_folder, f"{iso}_lossmask_{2000 + short_year}.tif")
+
+    r = Raster(loss_raster)
+    mask = SetNull(r != short_year, 1)
+    mask.save(out_raster)
+
+    return out_raster
+
+
+def scratch_folder(datadir):
+    scratch_workspace = os.path.join(datadir, "scratch")
+    if not os.path.exists(scratch_workspace):
+        os.mkdir(scratch_workspace)
+    return scratch_workspace
+
+
+def results_gdb(datadir, gdb_name):
+    gdb = "{}.gdb".format(gdb_name)
+    results_gdb = os.path.join(datadir, gdb)
+    if not os.path.exists(results_gdb):
+        arcpy.CreateFileGDB_management(datadir, gdb)
+    return results_gdb
+
+
+def extract_loss(scratch, lossyearmosaic, country_shapefile_int, iso, scratch_gdb):
+    arcpy.CheckOutExtension("Spatial")
+    arcpy.env.overwriteOutput = True
+    arcpy.env.workspace = scratch_gdb
+    arcpy.env.scratchWorkspace = scratch
+
+    mosaic_name = iso + "_extract"
+    sr = 4326
+    iso_loss_mosaic = arcpy.CreateMosaicDataset_management(scratch_gdb, mosaic_name, sr)
+
+    extracted_folder = os.path.join(scratch, "extracted_tifs")
+    if not os.path.exists(extracted_folder):
+        os.mkdir(extracted_folder)
+
+    fields = ['OID@', 'ISO', 'SHAPE@']
+    shapecount = 0
+
+    with arcpy.da.SearchCursor(country_shapefile_int, fields) as cursor:
+        for oid, iso_row, geometry in cursor:
+            shapecount += 1
+
+            if str(iso_row).strip().upper() == str(iso).strip().upper():
+
+                if geometry is None or geometry.partCount == 0 or geometry.area == 0:
+                    print(f"Skipping bad geometry for {iso}, OID={oid}")
+                    continue
+
+                try:
+                    print(f"Processing {iso}, OID={oid}")
+                    country_loss = arcpy.sa.ExtractByMask(lossyearmosaic, geometry)
+
+                    extracted_tif = os.path.join(
+                        extracted_folder, "{0}_{1}.tif".format(iso, shapecount))
+                    country_loss.save(extracted_tif)
+
+                    extracted_tif_nd = extracted_tif.replace(".tif", "_nd.tif")
+                    cmd = ["gdal_translate", "-a_nodata", "0",
+                           extracted_tif, extracted_tif_nd]
+                    subprocess.check_call(cmd)
+
+                except Exception as e:
+                    print(f"Skipping bad feature for {iso}, OID={oid}")
+                    print(e)
+                    print(arcpy.GetMessages())
+                    continue
+
+    # Arc has trouble deleting the pre-nodata files, so only the _nd versions
+    # are added to the mosaic.
+    nd_tifs = glob.glob(os.path.join(extracted_folder, "{}*nd*".format(iso)))
+    for tif in nd_tifs:
+        arcpy.AddRastersToMosaicDataset_management(iso_loss_mosaic, "Raster Dataset", tif)
+
+    return iso_loss_mosaic
+
+
+def aggregate(scratch, iso, loss_mosaic):
+    arcpy.env.snapRaster = config.SNAP_RASTER
+    agg_out = os.path.join(scratch, iso + "_aggregate.tif")
+    loss_aggregate = arcpy.gp.Aggregate_sa(loss_mosaic, agg_out, config.CELL_FACTOR,
+                                           "SUM", "TRUNCATE", "DATA")
+    return loss_aggregate
+
+
+def raster_to_point(scratch, iso, loss_aggregate, short_year):
+    temp_points = os.path.join(scratch, iso + "_{}_temp_points".format(short_year))
+    arcpy.RasterToPoint_conversion(loss_aggregate, temp_points, "Value")
+    return temp_points
+
+
+def add_date(temp_points, short_year):
+    arcpy.management.AddField(temp_points, "date", "DATE")
+
+    year = 2000 + short_year
+    expr = f"datetime.datetime({year}, 1, 1)"
+    code_block = "import datetime"
+
+    arcpy.management.CalculateField(temp_points, "date", expr, "PYTHON3", code_block)
+
+
+def create_append_fc(geodatabase, iso, temp_points, short_year):
+    all_points = os.path.join(geodatabase, iso + "_all_points")
+
+    if arcpy.Exists(all_points) and short_year != 2:
+        print("     appending points")
+        arcpy.Append_management(temp_points, all_points)
+    else:
+        if arcpy.Exists(all_points):
+            arcpy.Delete_management(all_points)
+        print("making and appending {}".format(temp_points))
+        arcpy.CreateFeatureclass_management(geodatabase, iso + "_all_points", "POINT",
+                                            template=temp_points,
+                                            spatial_reference=config.POINT_SR)
+        arcpy.Append_management(temp_points, all_points)
+
+    arcpy.Delete_management(temp_points)
+    return all_points
+
+
+def create_space_time_cube(all_points, datadir, iso):
+    out_cube = os.path.join(datadir, iso + "_cube.nc")
+
+    # overwriteOutput does not apply to .nc files
+    if os.path.exists(out_cube):
+        os.remove(out_cube)
+
+    arcpy.stpm.CreateSpaceTimeCube(all_points, out_cube, "date", None, "1 Years",
+                                   "START_TIME", None,
+                                   "{} Meters".format(config.CUBE_CELL_SIZE),
+                                   "grid_code SUM ZEROS")
+    return out_cube
+
+
+def load_distance_lookup(distance_table, iso_field="iso", distance_field="distance_m"):
+    """
+    Read per-country EHS neighborhood distances into {ISO: meters}.
+    Accepts .csv or .xlsx. Column headers are lowercased before lookup.
+    """
+    import pandas as pd
+
+    ext = os.path.splitext(distance_table)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(distance_table)
+    else:
+        df = pd.read_csv(distance_table)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    lookup = {}
+    for _, row in df.iterrows():
+        iso_key = str(row[iso_field]).strip().upper()
+        lookup[iso_key] = float(row[distance_field])
+    return lookup
+
+
+def find_country_mask(mask_gdb, iso):
+    r"""
+    Locate the pre-built primary forest mask for one country.
+    Naming convention: <mask_gdb>\<ISO>_tcd_merged_mask
+    Masks are built by build_primary_masks.py.
+    Returns the path, or None if it does not exist.
+    """
+    name = str(iso).strip().upper() + "_tcd_merged_mask"
+    path = os.path.join(mask_gdb, name)
+
+    if arcpy.Exists(path):
+        return path
+    return None
+
+
+def create_hot_spots(out_cube, results_gdb, iso, datadir, neighborhood_distance,
+                     polygon_mask=None, neighborhood_time_step=1,
+                     cube_cell_size=None):
+
+    if cube_cell_size is None:
+        cube_cell_size = config.CUBE_CELL_SIZE
+
+    if neighborhood_distance < cube_cell_size:
+        print("     note: {} distance {} m is below the cube cell size {} m, "
+              "the tool will use the cell size".format(
+                  iso, neighborhood_distance, cube_cell_size))
+
+    ehs_result = os.path.join(results_gdb, iso + "_ehs")
+
+    arcpy.stpm.EmergingHotSpotAnalysis(
+        out_cube,
+        "GRID_CODE_SUM_ZEROS",
+        ehs_result,
+        "{} Meters".format(neighborhood_distance),
+        neighborhood_time_step,
+        polygon_mask
+    )
+
+    log = os.path.join(datadir, iso + "_ehs_output.txt")
+    with open(log, 'a') as f:
+        f.write("neighborhood distance: {} Meters\n".format(neighborhood_distance))
+        f.write(arcpy.GetMessages())
+        f.write("\n")
+
+    return ehs_result
