@@ -1,0 +1,15 @@
+*.gdb/
+*.nc
+*.tif
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+*.sbn
+*.sbx
+data/
+results/
+scratch/
+__pycache__/
+*.pyc
