@@ -1,0 +1,274 @@
+"""
+Build per-country primary forest masks for the emerging hot spot workflow.
+
+Two stages:
+
+1. Vectorize. Converts 10-degree primary forest raster tiles (1 = primary,
+   0 = not primary) into vector tiles named tile_<tile_id> in
+   config.PRIMARY_VECTOR_GDB. The tiles are global and country-agnostic, so
+   this only needs to run when the primary forest dataset itself changes.
+   Controlled by the VECTORIZE_TILES flag below.
+
+2. Build masks. Clips the vector tiles to each country, merges, and
+   simplifies. Writes one feature class per country named
+   <ISO>_tcd_merged_mask into config.MASK_GDB. Run this whenever the
+   country list changes.
+
+The EHS workflow (main.py) reads the finished masks via
+utilities.find_country_mask and does not rebuild them.
+
+Edit config.py before running.
+"""
+
+import arcpy
+import os
+import glob
+
+import config
+
+from arcpy.sa import Raster, SetNull
+
+
+# Set to True when the primary forest dataset changes and the vector tiles
+# need rebuilding. Leave False to reuse the existing tiles and only rebuild
+# the per-country masks.
+VECTORIZE_TILES = False
+
+# Raster extension to look for in config.PRIMARY_RASTER_TILES
+RASTER_EXT = "*.tif"
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: vectorize the primary forest raster tiles
+# ---------------------------------------------------------------------------
+
+def tile_id_from_path(raster_path):
+    """
+    Derive the tile id from the raster filename. Assumes the id is the last
+    8 characters of the name before the extension, for example
+    Hansen_primary_00N_010E.tif gives 00N_010E.
+    """
+    stem = os.path.splitext(os.path.basename(raster_path))[0]
+    return stem[-8:]
+
+
+def vectorize_tile(raster_path, scratch_folder, out_gdb):
+    """
+    Set 0 to NoData, convert the remaining primary pixels to polygons, and
+    write a feature class named tile_<tile_id>. Returns the output path, or
+    None if the tile holds no primary forest.
+    """
+    tile_id = tile_id_from_path(raster_path)
+
+    # Geodatabase names cannot start with a digit, hence the prefix
+    out_fc = os.path.join(out_gdb, "tile_" + tile_id)
+
+    if arcpy.Exists(out_fc):
+        print("     {} already vectorized, skipping".format(tile_id))
+        return out_fc
+
+    primary_only = os.path.join(scratch_folder, tile_id + "_primary.tif")
+
+    r = Raster(raster_path)
+    masked = SetNull(r != 1, 1)
+    masked.save(primary_only)
+
+    # NO_SIMPLIFY keeps the pixel edges. Simplifying here would compound with
+    # the simplify in merge_and_simplify below.
+    arcpy.RasterToPolygon_conversion(primary_only, out_fc, "NO_SIMPLIFY", "Value",
+                                     "MULTIPLE_OUTER_PART")
+
+    arcpy.Delete_management(primary_only)
+
+    count = int(arcpy.GetCount_management(out_fc)[0])
+    if count == 0:
+        print("     {} has no primary forest, removing empty output".format(tile_id))
+        arcpy.Delete_management(out_fc)
+        return None
+
+    print("     {} wrote {} polygons".format(tile_id, count))
+    return out_fc
+
+
+def vectorize_all_tiles():
+    """
+    Convert every raster tile in config.PRIMARY_RASTER_TILES to a vector
+    tile. Tiles that already exist are skipped, so the run can be stopped
+    and resumed.
+    """
+    arcpy.CheckOutExtension("Spatial")
+    arcpy.env.overwriteOutput = True
+
+    out_gdb = config.PRIMARY_VECTOR_GDB
+
+    if not arcpy.Exists(out_gdb):
+        gdb_folder, gdb_name = os.path.split(out_gdb)
+        arcpy.CreateFileGDB_management(gdb_folder, gdb_name)
+
+    scratch_folder = os.path.join(os.path.dirname(out_gdb), "vectorize_scratch")
+    if not os.path.exists(scratch_folder):
+        os.makedirs(scratch_folder)
+
+    tiles = sorted(glob.glob(os.path.join(config.PRIMARY_RASTER_TILES, RASTER_EXT)))
+    print("found {} raster tiles".format(len(tiles)))
+
+    for raster_path in tiles:
+        tile_id = tile_id_from_path(raster_path)
+        print("vectorizing {}".format(tile_id))
+
+        try:
+            vectorize_tile(raster_path, scratch_folder, out_gdb)
+        except Exception as e:
+            print("Failed for {}".format(tile_id))
+            print(e)
+            print(arcpy.GetMessages())
+            continue
+
+    try:
+        arcpy.Delete_management(scratch_folder)
+    except Exception as e:
+        print("could not remove scratch folder")
+        print(e)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: clip, merge, and simplify into per-country masks
+# ---------------------------------------------------------------------------
+
+def select_tiles(country_shapefile, footprint):
+    """
+    Return tile ids from the footprint grid that intersect the country.
+    Tile id is the last 8 characters of the Name field.
+    """
+    grid_layer = "grid_layer"
+    arcpy.MakeFeatureLayer_management(footprint, grid_layer)
+
+    try:
+        arcpy.SelectLayerByLocation_management(grid_layer, "INTERSECT",
+                                               country_shapefile)
+
+        tile_list = []
+        with arcpy.da.SearchCursor(grid_layer, ["Name"]) as cursor:
+            for row in cursor:
+                tile_list.append(str(row[0])[-8:])
+    finally:
+        arcpy.Delete_management(grid_layer)
+
+    return tile_list
+
+
+def clip_tiles(tile_list, country_shapefile, scratch_gdb, iso):
+    """
+    Clip each intersecting tile to the country boundary. Skips tiles with no
+    feature class in the vector tile geodatabase, and clips that come back
+    empty.
+    """
+    clipped_list = []
+
+    for tileid in tile_list:
+        mask_tile = os.path.join(config.PRIMARY_VECTOR_GDB, "tile_" + tileid)
+
+        if not arcpy.Exists(mask_tile):
+            print("     no tile for {}, skipping".format(tileid))
+            continue
+
+        clipped_path = os.path.join(scratch_gdb, "{}_{}_clip".format(iso, tileid))
+        arcpy.Clip_analysis(mask_tile, country_shapefile, clipped_path)
+
+        if int(arcpy.GetCount_management(clipped_path)[0]) == 0:
+            arcpy.Delete_management(clipped_path)
+            continue
+
+        clipped_list.append(clipped_path)
+
+    return clipped_list
+
+
+def merge_and_simplify(clipped_list, scratch_gdb, iso):
+    r"""
+    Merge the clipped tiles and simplify. Returns the path to
+    <config.MASK_GDB>\<ISO>_tcd_merged_mask.
+    """
+    merged = os.path.join(scratch_gdb, iso + "_merged_raw")
+    arcpy.Merge_management(clipped_list, merged)
+
+    final_path = os.path.join(config.MASK_GDB, iso + "_tcd_merged_mask")
+
+    if arcpy.Exists(final_path):
+        arcpy.Delete_management(final_path)
+
+    arcpy.SimplifyPolygon_cartography(merged, final_path, "BEND_SIMPLIFY",
+                                      config.SIMPLIFY_TOLERANCE,
+                                      config.SIMPLIFY_MIN_AREA)
+
+    arcpy.Delete_management(merged)
+
+    return final_path
+
+
+def build_all_masks():
+    """
+    Build one mask per country in config.COUNTRY_MASKS.
+    """
+    arcpy.env.overwriteOutput = True
+
+    if not arcpy.Exists(config.MASK_GDB):
+        gdb_folder, gdb_name = os.path.split(config.MASK_GDB)
+        arcpy.CreateFileGDB_management(gdb_folder, gdb_name)
+
+    scratch_gdb = os.path.join(os.path.dirname(config.MASK_GDB), "mask_scratch.gdb")
+    if not arcpy.Exists(scratch_gdb):
+        scratch_folder, scratch_name = os.path.split(scratch_gdb)
+        arcpy.CreateFileGDB_management(scratch_folder, scratch_name)
+
+    country_shapefile = os.path.join(scratch_gdb, "country_selection")
+
+    with arcpy.da.SearchCursor(config.COUNTRY_MASKS, ["ISO"]) as cursor:
+        for row in cursor:
+            iso = str(row[0]).strip().upper()
+            print("building mask for {}".format(iso))
+
+            try:
+                where = "\"ISO\" = '{}'".format(iso)
+                arcpy.Select_analysis(config.COUNTRY_MASKS, country_shapefile, where)
+
+                print("     selecting intersecting tiles")
+                tile_list = select_tiles(country_shapefile, config.TILE_GRID)
+                print("     {} tiles intersect".format(len(tile_list)))
+
+                if not tile_list:
+                    print("     no tiles found, skipping")
+                    continue
+
+                print("     clipping tiles to country")
+                clipped_list = clip_tiles(tile_list, country_shapefile,
+                                          scratch_gdb, iso)
+
+                if not clipped_list:
+                    print("     all clips empty, skipping")
+                    continue
+
+                print("     merging and simplifying")
+                final_path = merge_and_simplify(clipped_list, scratch_gdb, iso)
+
+                for clipped in clipped_list:
+                    arcpy.Delete_management(clipped)
+
+                count = arcpy.GetCount_management(final_path)[0]
+                print("     wrote {} with {} features".format(
+                    os.path.basename(final_path), count))
+
+            except Exception as e:
+                print("Failed for {}".format(iso))
+                print(e)
+                print(arcpy.GetMessages())
+                continue
+
+
+if __name__ == "__main__":
+    if VECTORIZE_TILES:
+        print("=== vectorizing primary forest raster tiles ===")
+        vectorize_all_tiles()
+
+    print("=== building per-country masks ===")
+    build_all_masks()
