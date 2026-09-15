@@ -19,11 +19,8 @@ spot analysis using a per-country neighborhood distance.
 
 ## Setup
 
-1. Copy `config_template.py` to a new `config.py`.
-2. Edit every path in `config.py` to match your machine.
-3. `config.py` is gitignored, so your local paths stay local.
-
-`config.py` is the only file that needs editing.
+Edit the paths at the top of `config.py` to match your machine. That is the
+only file that needs changing.
 
 ## Running
 
@@ -44,22 +41,30 @@ The per-country masks do not need rebuilding for a new year of loss data.
 ### Rebuilding the primary forest masks
 
 Only needed when the primary forest dataset changes, or when the country
-list changes.
+list changes. Both stages live in `build_primary_masks.py`.
 
 New primary forest dataset:
 
 1. Point `PRIMARY_RASTER_TILES` at the new raster tiles.
 2. Set `VECTORIZE_TILES = True`.
-3. Run `build_primary_masks.py`. Both stages execute.
+3. Run `build_primary_masks.py`. The script vectorizes the raster tiles into
+   `PRIMARY_VECTOR_GDB`, then clips, merges, and simplifies them into
+   per-country masks in `MASK_GDB`.
 4. Set `VECTORIZE_TILES` back to `False`.
 
 Country list changed, same primary forest data:
 
-1. Update `COUNTRY_MASKS_INPUT`.
+1. Update the country list variable.
 2. Leave `VECTORIZE_TILES = False`.
-3. Run `build_primary_masks.py`. Existing vector tiles are reused.
+3. Run `build_primary_masks.py`. The existing vector tiles are reused and
+   only the masks are rebuilt.
 
-`main.py` never triggers the mask build. The two are run independently.
+The vectorize stage skips tiles that already exist, so a long run can be
+stopped and resumed.
+
+`main.py` never triggers the mask build. The two scripts are run
+independently, and a new year of loss data does not require rebuilding
+masks.
 
 ## Files
 
