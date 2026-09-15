@@ -1,0 +1,75 @@
+import arcpy
+import datetime
+
+import config
+import utilities
+
+
+def emerging_hs_points(country_shapefile, country_shapefile_int, datadir, iso,
+                       distance_lookup):
+
+    # Create directories
+    scratch_workspace = utilities.scratch_folder(datadir)
+    results_gdb = utilities.results_gdb(datadir, "results")
+    scratch_gdb_workspace = utilities.results_gdb(datadir, "scratch")
+
+    # Set environments
+    arcpy.env.scratchWorkspace = scratch_workspace
+    arcpy.env.workspace = datadir
+    arcpy.env.snapRaster = config.AREA_MOSAIC
+    arcpy.CheckOutExtension("Spatial")
+    arcpy.env.overwriteOutput = True
+    start = datetime.datetime.now()
+
+    print("     extracting loss data with country")
+    extract_file = utilities.extract_loss(scratch_workspace, config.LOSS_MOSAIC,
+                                          country_shapefile_int, iso,
+                                          scratch_gdb_workspace)
+
+    all_points = None
+
+    for short_year in range(2, config.LAST_SHORT_YEAR + 1):
+        print("\nPROCESSING RASTER VALUE {} (YEAR = {})".format(
+            short_year, 2000 + short_year))
+
+        year_mask_raster = utilities.make_year_mask_raster(
+            extract_file, short_year, scratch_workspace, iso)
+
+        print("     aggregating loss data by {}".format(config.CELL_FACTOR))
+        loss_aggregate = utilities.aggregate(scratch_workspace, iso, year_mask_raster)
+
+        print("     converting loss data to point")
+        temp_points = utilities.raster_to_point(scratch_gdb_workspace, iso,
+                                                loss_aggregate, short_year)
+
+        print("     adding date to point file")
+        utilities.add_date(temp_points, short_year)
+
+        print("     create/append all points")
+        all_points = utilities.create_append_fc(results_gdb, iso, temp_points,
+                                                short_year)
+
+    print("     create space time cube")
+    cube = utilities.create_space_time_cube(all_points, datadir, iso)
+
+    print("     finding primary forest mask")
+    primary_mask = utilities.find_country_mask(config.MASK_GDB, iso)
+
+    if primary_mask is None:
+        raise RuntimeError(
+            "no primary forest mask found for {} in {}".format(iso, config.MASK_GDB))
+
+    distance = distance_lookup.get(str(iso).strip().upper())
+
+    if distance is None:
+        raise RuntimeError("no neighborhood distance on file for {}".format(iso))
+
+    print("     running EHS for {} at {} m using {}".format(iso, distance, primary_mask))
+    utilities.create_hot_spots(cube, results_gdb, iso, datadir, distance,
+                               polygon_mask=primary_mask)
+
+    print("     empty scratch folder")
+    arcpy.Delete_management(scratch_workspace)
+
+    end = datetime.datetime.now() - start
+    arcpy.AddMessage(iso + " EHS took this long: " + str(end))
