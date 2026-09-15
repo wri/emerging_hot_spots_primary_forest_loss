@@ -1,0 +1,50 @@
+"""
+Emerging hot spot analysis of primary forest loss, by country.
+
+Loops over countries, extracts annual primary forest loss, aggregates to
+points, builds a space time cube, and runs emerging hot spot analysis using
+a per-country neighborhood distance.
+
+Per-country primary forest masks must exist before running this. Build them
+with vectorize_primary_tiles.py then build_primary_masks.py.
+
+Edit config.py before running.
+"""
+
+import arcpy
+import os
+
+import config
+import emerging_hotspot_factor
+import utilities
+
+
+datadir = os.path.join(config.OUTPUT_ROOT, "ehs_{}".format(config.DATA_YEAR))
+if not os.path.exists(datadir):
+    os.makedirs(datadir)
+
+arcpy.env.workspace = datadir
+arcpy.env.overwriteOutput = True
+
+distance_lookup = utilities.load_distance_lookup(config.DISTANCE_TABLE)
+
+with arcpy.da.SearchCursor(config.COUNTRY_EHS, ["ISO"]) as cursor:
+    for row in cursor:
+        iso = row[0]
+        print("running code for {}".format(iso))
+
+        try:
+            where = '"ISO" = ' + "'{}'".format(iso)
+            country_shapefile = os.path.join(datadir, "country_shapefile.shp")
+
+            arcpy.Select_analysis(config.COUNTRY_EHS, country_shapefile, where)
+
+            emerging_hotspot_factor.emerging_hs_points(
+                country_shapefile, config.COUNTRY_EHS_INT, datadir, iso,
+                distance_lookup
+            )
+        except Exception as e:
+            print("Failed for {}".format(iso))
+            print(e)
+            print(arcpy.GetMessages())
+            continue
