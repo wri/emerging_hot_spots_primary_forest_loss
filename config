@@ -1,0 +1,87 @@
+"""
+Paths and settings for the emerging hot spot workflow.
+
+This is the only file that needs editing to run on a new machine. Copy
+config_template.py to config.py and set every path below. config.py is
+gitignored so local edits stay local.
+
+See README.md for which S3 object corresponds to each input.
+"""
+
+# ---------------------------------------------------------------------------
+# Data version. Update both of these each year.
+# ---------------------------------------------------------------------------
+
+# Used to name the output folder, so results from different years do not mix
+DATA_YEAR = 2025
+
+# Last short year in the loss data. 2025 data runs 2001-2025, so 25.
+LAST_SHORT_YEAR = 25
+
+
+# ---------------------------------------------------------------------------
+# Country boundaries. Both layers need an ISO field.
+#
+# COUNTRY_EHS is what the EHS workflow loops over, often a test subset.
+# COUNTRY_EHS_INT is the same countries pre-split into smaller pieces, which
+# keeps the extract step from choking on large countries.
+# COUNTRY_MASKS is what the mask builder loops over, usually the full list,
+# since masks are built once and reused.
+# ---------------------------------------------------------------------------
+
+COUNTRY_EHS = r'C:\GIS_data\projects\emerging_hotspots\test_ehs.shp'
+COUNTRY_EHS_INT = r'C:\GIS_data\projects\emerging_hotspots\test_ehs_int.shp'
+COUNTRY_MASKS = r'C:\GIS_data\projects\emerging_hotspots\test_ehs.shp'
+
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+LOSS_MOSAIC = r'C:\GIS_data\projects\emerging_hotspots\ehs_2025\ehs_2025.gdb\loss'
+AREA_MOSAIC = r'C:\GIS_data\projects\emerging_hotspots\ehs_2025\ehs_2025.gdb\area'
+
+# Raster the aggregate step snaps to
+SNAP_RASTER = r'C:\GIS_data\projects\emerging_hotspots\ehs_files\test_agg.tif'
+
+# Per-country EHS neighborhood distances, in meters.
+# Needs an iso column and a distance_m column.
+DISTANCE_TABLE = r'C:\GIS_data\projects\emerging_hotspots\ehs_files\ehs_distances.xlsx'
+
+# Footprint grid whose Name field ends in the tile id
+TILE_GRID = r'C:\GIS_data\global_shps\tiles\lossdata_footprint.shp'
+
+
+# ---------------------------------------------------------------------------
+# Primary forest mask pipeline. Run vectorize_primary_tiles.py then
+# build_primary_masks.py when the primary forest dataset changes.
+# ---------------------------------------------------------------------------
+
+# Raster tiles, 1 = primary, 0 = not primary
+PRIMARY_RASTER_TILES = r'C:\GIS_data\global_shps\primary_raster'
+
+# Vector tiles written by vectorize_primary_tiles.py, named tile_<tile_id>
+PRIMARY_VECTOR_GDB = r'C:\GIS_data\global_shps\primary_vector.gdb'
+
+# Per-country masks written by build_primary_masks.py, named
+# <ISO>_tcd_merged_mask. Read by the EHS workflow.
+MASK_GDB = r'C:\GIS_data\projects\emerging_hotspots\server_files\results_masks.gdb'
+
+SIMPLIFY_TOLERANCE = "1 Meters"
+SIMPLIFY_MIN_AREA = "100 Hectares"
+
+
+# ---------------------------------------------------------------------------
+# Output. A subfolder named ehs_<DATA_YEAR> is created here.
+# ---------------------------------------------------------------------------
+
+OUTPUT_ROOT = r'C:\GIS_data\projects\emerging_hotspots\results'
+
+
+# ---------------------------------------------------------------------------
+# Analysis settings. These should not change unless experimenting with adjusted methods.
+# ---------------------------------------------------------------------------
+
+CELL_FACTOR = 80            # aggregate step
+CUBE_CELL_SIZE = 2226.3898  # cube cell size, also the minimum EHS distance
+POINT_SR = 32662            # EPSG for points and cube, Plate Carree
